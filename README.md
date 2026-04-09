@@ -1,4 +1,4 @@
-# ToyPy 🧸
+# ToyPy
 
 한글 기반 DSL(Domain Specific Language)을 Python 코드로 변환하는 간단한
 트랜스파일러입니다.
