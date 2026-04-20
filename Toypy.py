@@ -1,23 +1,35 @@
 import os
 import re
 import sys
+from KeyWords import KEYWORDS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.join(BASE_DIR, "Code")
 OUTPUT_DIR = os.path.join(BASE_DIR, "PythonScript")
 
-KEYWORDS = [ 
-    "이런 기능이 있어", "번 반복해", "만약에 말이야", "아니면", "전부 아니면",
-    "하나씩 꺼내서", "혹시 모르니까 한번 해봐", "근데 문제가 생기면", "아무튼 간에",
-    "이런 설계도가 있어", "만들 때", "숫자를 늘려가며",
-    "있으면", "없으면" # 사전 조건문 키워드 추가
-]
+# 특정 키워드가 코드에 포함될 경우 자동으로 추가할 import 목록
+AUTO_IMPORTS = {
+    "밀리초 기다려":   "import time",
+    "키가 눌렸어?":    "import msvcrt",
+    "눌린 키가 뭐야?": "import msvcrt",
+    "화면 깨끗이":     "import os",
+}
 
 def needs_colon_hint(line):
     for kw in KEYWORDS:
         if kw in line and not line.strip().endswith(":"):
             return True
     return False
+
+def get_required_imports(code):
+    """코드 내 키워드를 스캔하여 필요한 import 문을 반환 (중복 제거)"""
+    required = []
+    seen = set()
+    for keyword, import_stmt in AUTO_IMPORTS.items():
+        if keyword in code and import_stmt not in seen:
+            required.append(import_stmt)
+            seen.add(import_stmt)
+    return required
 
 def transform_line(line):
     stripped = line.strip()
@@ -31,67 +43,97 @@ def transform_line(line):
     stripped = re.sub(r'^만들 때\((.*?)\):', r'def __init__(self, \1):', stripped)
     stripped = re.sub(r'^내\s+(\w+)\s+(는|은)\s+(.*)', r'self.\1 = \3', stripped)
 
-    # 3. 사전(Dictionary) 기능 (제어문보다 먼저 처리하여 문장 조합 대응)
-    # 초기화: "인벤토리" 라는 사전에는 {"포션": 5} 라고 되어있어
+    # 3. 사전(Dictionary) 기능
     stripped = re.sub(r'^"(.*)"\s+(?:라는|이라는)\s+사전에는\s+(.*)\s+라고 되어있어', r'\1 = \2', stripped)
-    
-    # 존재 여부 확인 (조건문용): 만약에 말이야 인벤토리 에 "포션" 이 있으면:
     stripped = re.sub(r'만약에 말이야\s+(.*)\s+에\s+(.*)\s+(?:이|가)\s+있으면:', r'if \2 in \1:', stripped)
     stripped = re.sub(r'만약에 말이야\s+(.*)\s+에\s+(.*)\s+(?:이|가)\s+없으면:', r'if \2 not in \1:', stripped)
-
-    # 모든 키 가져오기: 인벤토리 에 뭐뭐 있어? -> list(인벤토리.keys())
     stripped = re.sub(r'(.*)\s+에\s+뭐뭐\s+있어\?', r'list(\1.keys())', stripped)
-
-    # 항목 추가/수정: 인벤토리 에 "검" 을 1 로 저장해
     stripped = re.sub(r'(.*)\s+에\s+(.*)\s+를\s+(.*)\s+(?:으)?로\s+저장해', r'\1[\2] = \3', stripped)
-    
-    # 항목 삭제: 인벤토리 에서 "검" 은 지워줘
     stripped = re.sub(r'(.*)\s+에서\s+(.*)\s+(?:은|는)\s+지워줘', r'del \1[\2]', stripped)
-
-    # 단순 존재 확인: 인벤토리 에 "검" 이 있어? -> "검" in 인벤토리
     stripped = re.sub(r'(.*)\s+에\s+(.*)\s+(?:이|가)\s+있어\?', r'\2 in \1', stripped)
 
-    # 4. 함수 및 제어문
-    stripped = re.sub(r'^(\d+)\s+부터\s+(\d+)\s+까지 하나씩 숫자를 늘려가며\s+(.*)\s+이라고 부르고:', 
-                      lambda m: f'for {m.group(3)} in range({m.group(1)}, {int(m.group(2)) + 1}):', stripped)
+    # 4. 함수 정의
     stripped = re.sub(r'^이런 기능이 있어\s+(\w+)\((.*?)\):', r'def \1(\2):', stripped)
+
+    # 5. 반복문 - for 계열
+    # 이전까지 (exclusive, 표현식 지원): 0 부터 높이+2 이전까지 하나씩 숫자를 늘려가며 y 이라고 부르고:
+    stripped = re.sub(
+        r'^(.*)\s+부터\s+(.*)\s+이전까지 하나씩 숫자를 늘려가며\s+(.*)\s+이라고 부르고:',
+        r'for \3 in range(\1, \2):',
+        stripped
+    )
+    # 까지 (inclusive, 숫자만): 1 부터 10 까지 하나씩 숫자를 늘려가며 i 이라고 부르고:
+    stripped = re.sub(
+        r'^(\d+)\s+부터\s+(\d+)\s+까지 하나씩 숫자를 늘려가며\s+(.*)\s+이라고 부르고:',
+        lambda m: f'for {m.group(3)} in range({m.group(1)}, {int(m.group(2)) + 1}):',
+        stripped
+    )
     stripped = re.sub(r'^(\d+)\s*번 반복해:', r'for _ in range(\1):', stripped)
+
+    # 6. 조건문
     stripped = re.sub(r'^만약에 말이야\s+(.*):', r'if \1:', stripped)
     stripped = re.sub(r'^아니면\s+(.*):', r'elif \1:', stripped)
     stripped = re.sub(r'^전부 아니면:', r'else:', stripped)
-    
-    # 5. 반복문 (리스트/사전 순회)
-    # 사전 순회 대응: 인벤토리 에 있는 것들 하나씩 꺼내서 이름, 개수 라고 부르고:
+
+    # 7. 반복문 - while 계열
+    stripped = re.sub(r'^영원히 반복해:', r'while True:', stripped)
+    stripped = re.sub(r'^(.*)\s+동안 반복해:', r'while \1:', stripped)
+
+    # 8. break / continue
+    stripped = re.sub(r'^멈춰$', r'break', stripped)
+    stripped = re.sub(r'^다음으로 넘어가$', r'continue', stripped)
+
+    # 9. 반복문 - 리스트/사전 순회
     if "하나씩 꺼내서" in stripped and "," in stripped:
         stripped = re.sub(r'^(.*)\s+에 있는 것들 하나씩 꺼내서\s+(.*)\s+이라고 부르고:', r'for \2 in \1.items():', stripped)
     else:
         stripped = re.sub(r'^(.*)\s+에 있는 것들 하나씩 꺼내서\s+(.*)\s+이라고 부르고:', r'for \2 in \1:', stripped)
 
-    # 6. 예외 처리
+    # 10. 예외 처리
     stripped = re.sub(r'^혹시 모르니까 한번 해봐:', r'try:', stripped)
     stripped = re.sub(r'^근데 문제가 생기면:', r'except Exception:', stripped)
     stripped = re.sub(r'^아무튼 간에:', r'finally:', stripped)
 
-    # 7. 리스트 조작 및 타입 변환
+    # 11. 리스트 조작 및 타입 변환
+    stripped = re.sub(r'^(.*)\s+맨 앞에\s+(.*)\s+끼워줘$', r'\1.insert(0, \2)', stripped)
+    stripped = re.sub(r'^(.*)\s+끝 잘라줘$', r'\1.pop()', stripped)
     stripped = re.sub(r'(.*)\s+에\s+(.*)\s+도 넣어줘', r'\1.append(\2)', stripped)
     stripped = re.sub(r'(.*)\s+에서\s+(.*)\s+은 빼줘', r'\1.remove(\2)', stripped)
     stripped = re.sub(r'(.*)\s+가 얼마나 길어\?', r'len(\1)', stripped)
     stripped = re.sub(r'(.*)\s+를 숫자로 봐줘', r'int(\1)', stripped)
     stripped = re.sub(r'(.*)\s+를 글자로 봐줘', r'str(\1)', stripped)
 
-    # 8. 출력 및 할당
+    # 12. 화면 출력
+    # 화면 깨끗이 — 화면에 보여줘보다 반드시 먼저 처리
+    if stripped == "화면 깨끗이":
+        stripped = 'os.system("cls" if os.name == "nt" else "clear")'
+    # 이어서 출력 (end="" — 줄바꿈 없음)
+    stripped = re.sub(r'^화면에 이어서 보여줘\s+(.*)', r'print(\1, end="")', stripped)
+    # 줄 바꿔 (빈 print)
+    if stripped == "줄 바꿔":
+        stripped = "print()"
+    # 일반 출력
     stripped = re.sub(r'^화면에 보여줘\s+(.*)', r'print(\1)', stripped)
+
+    # 13. 함수 반환 및 변수 할당
     stripped = re.sub(r'^결과는\s+(.*)', r'return \1', stripped)
     stripped = re.sub(r'^(\w+)\s+(는|은)\s+값을 입력할래', r'\1 = input()', stripped)
     stripped = re.sub(r'^(\w+)\s+(는|은)\s+(.*)', r'\1 = \3', stripped)
 
-    # 9. 논리 연산
+    # 14. 비동기 입력 (msvcrt, Windows) — 할당 변환 이후에 적용
+    stripped = re.sub(r'키가 눌렸어\?', r'msvcrt.kbhit()', stripped)
+    stripped = re.sub(r'눌린 키가 뭐야\?', r"msvcrt.getch().decode('utf-8', errors='ignore')", stripped)
+
+    # 15. 시간 지연: N 밀리초 기다려 → time.sleep(N / 1000)
+    stripped = re.sub(r'^([\w.]+)\s+밀리초 기다려$', r'time.sleep(\1 / 1000)', stripped)
+
+    # 16. 논리 연산자
     stripped = stripped.replace("그리고", "and")
     stripped = stripped.replace("또는", "or")
     stripped = stripped.replace("아님", "not")
     stripped = stripped.replace("진짜야", "True")
     stripped = stripped.replace("가짜야", "False")
-    
+
     return original, stripped
 
 def transform_code(code):
@@ -133,6 +175,12 @@ def transform_code(code):
             colon_hints.append((idx + 1, line))
 
         result.append(' ' * indent + transformed)
+
+    required_imports = get_required_imports(code)
+    transformed_imports = [l.strip() for l in result if l.strip().startswith("import ")]
+    auto_to_add = [imp for imp in required_imports if imp not in transformed_imports]
+    if auto_to_add:
+        result = auto_to_add + [''] + result
 
     return '\n'.join(result), warnings, colon_hints
 
