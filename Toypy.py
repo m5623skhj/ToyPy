@@ -6,7 +6,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.join(BASE_DIR, "Code")
 OUTPUT_DIR = os.path.join(BASE_DIR, "PythonScript")
 
-# 새로운 키워드들을 추가하여 콜론(:) 체크를 강화했습니다.
 KEYWORDS = [ 
     "이런 기능이 있어", "번 반복해", "만약에 말이야", "아니면", "전부 아니면",
     "하나씩 꺼내서", "혹시 모르니까 한번 해봐", "근데 문제가 생기면", "아무튼 간에",
