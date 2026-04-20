@@ -6,9 +6,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.join(BASE_DIR, "Code")
 OUTPUT_DIR = os.path.join(BASE_DIR, "PythonScript")
 
+# 새로운 키워드들을 추가하여 콜론(:) 체크를 강화했습니다.
 KEYWORDS = [ 
     "이런 기능이 있어", "번 반복해", "만약에 말이야", "아니면", "전부 아니면",
-    "하나씩 꺼내서", "혹시 모르니까 한번 해봐", "근데 문제가 생기면", "아무튼 간에"
+    "하나씩 꺼내서", "혹시 모르니까 한번 해봐", "근데 문제가 생기면", "아무튼 간에",
+    "이런 설계도가 있어", "만들 때"
 ]
 
 def needs_colon_hint(line):
@@ -21,24 +23,54 @@ def transform_line(line):
     stripped = line.strip()
     original = stripped
 
+    # 1. 외부 라이브러리 사용 (Import)
+    # 문법: 저기 있는 [라이브러리] 좀 가져와
+    stripped = re.sub(r'^저기 있는\s+(.*)\s+좀 가져와', r'import \1', stripped)
+
+    # 2. 클래스 정의 (Class)
+    # 문법: 이런 설계도가 있어 [이름]:
+    stripped = re.sub(r'^이런 설계도가 있어\s+(\w+):', r'class \1:', stripped)
+    # 문법: 만들 때(인자...): -> __init__ (파이썬 관례상 self 자동 추가)
+    stripped = re.sub(r'^만들 때\((.*?)\):', r'def __init__(self, \1):', stripped)
+    # 문법: 내 [속성] 은 [값] -> self.[속성] = [값]
+    stripped = re.sub(r'^내\s+(\w+)\s+(는|은)\s+(.*)', r'self.\1 = \3', stripped)
+
+    # 3. 함수 및 제어문
     stripped = re.sub(r'^이런 기능이 있어\s+(\w+)\((.*?)\):', r'def \1(\2):', stripped)
     stripped = re.sub(r'^(\d+)\s*번 반복해:', r'for _ in range(\1):', stripped)
     stripped = re.sub(r'^만약에 말이야\s+(.*):', r'if \1:', stripped)
     stripped = re.sub(r'^아니면\s+(.*):', r'elif \1:', stripped)
     stripped = re.sub(r'^전부 아니면:', r'else:', stripped)
     
+    # 4. Foreach (리스트 반복)
     stripped = re.sub(r'^(.*)\s+에 있는 것들 하나씩 꺼내서\s+(.*)\s+이라고 부르고:', r'for \2 in \1:', stripped)
 
+    # 5. 예외 처리
     stripped = re.sub(r'^혹시 모르니까 한번 해봐:', r'try:', stripped)
     stripped = re.sub(r'^근데 문제가 생기면:', r'except Exception:', stripped)
     stripped = re.sub(r'^아무튼 간에:', r'finally:', stripped)
 
+    # 6. 리스트 조작 (List Operations) 및 타입 변환 (Casting)
+    # 아래 기능들은 할당문(=) 내부에 포함될 수 있으므로 먼저 처리하거나 치환합니다.
+    
+    # 리스트 추가: [리스트] 에 [값] 도 넣어줘
+    stripped = re.sub(r'(.*)\s+에\s+(.*)\s+도 넣어줘', r'\1.append(\2)', stripped)
+    # 리스트 삭제: [리스트] 에서 [값] 은 빼줘
+    stripped = re.sub(r'(.*)\s+에서\s+(.*)\s+은 빼줘', r'\1.remove(\2)', stripped)
+    # 리스트 길이: [리스트] 가 얼마나 길어?
+    stripped = re.sub(r'(.*)\s+가 얼마나 길어\?', r'len(\1)', stripped)
+    
+    # 타입 변환: [값] 을 숫자로 봐줘 / 글자로 봐줘
+    stripped = re.sub(r'(.*)\s+를 숫자로 봐줘', r'int(\1)', stripped)
+    stripped = re.sub(r'(.*)\s+를 글자로 봐줘', r'str(\1)', stripped)
+
+    # 7. 출력 및 할당
     stripped = re.sub(r'^화면에 보여줘\s+(.*)', r'print(\1)', stripped)
     stripped = re.sub(r'^결과는\s+(.*)', r'return \1', stripped)
-    
     stripped = re.sub(r'^(\w+)\s+(는|은)\s+값을 입력할래', r'\1 = input()', stripped)
     stripped = re.sub(r'^(\w+)\s+(는|은)\s+(.*)', r'\1 = \3', stripped)
 
+    # 8. 논리 연산
     stripped = stripped.replace("그리고", "and")
     stripped = stripped.replace("또는", "or")
     stripped = stripped.replace("아님", "not")
