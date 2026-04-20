@@ -9,7 +9,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "PythonScript")
 KEYWORDS = [ 
     "이런 기능이 있어", "번 반복해", "만약에 말이야", "아니면", "전부 아니면",
     "하나씩 꺼내서", "혹시 모르니까 한번 해봐", "근데 문제가 생기면", "아무튼 간에",
-    "이런 설계도가 있어", "만들 때"
+    "이런 설계도가 있어", "만들 때", "숫자를 늘려가며"
 ]
 
 def needs_colon_hint(line):
@@ -35,6 +35,8 @@ def transform_line(line):
     stripped = re.sub(r'^내\s+(\w+)\s+(는|은)\s+(.*)', r'self.\1 = \3', stripped)
 
     # 3. 함수 및 제어문
+    stripped = re.sub(r'^(\d+)\s+부터\s+(\d+)\s+까지 하나씩 숫자를 늘려가며\s+(.*)\s+이라고 부르고:', 
+                      lambda m: f'for {m.group(3)} in range({m.group(1)}, {int(m.group(2)) + 1}):', stripped)
     stripped = re.sub(r'^이런 기능이 있어\s+(\w+)\((.*?)\):', r'def \1(\2):', stripped)
     stripped = re.sub(r'^(\d+)\s*번 반복해:', r'for _ in range(\1):', stripped)
     stripped = re.sub(r'^만약에 말이야\s+(.*):', r'if \1:', stripped)
@@ -51,7 +53,6 @@ def transform_line(line):
 
     # 6. 리스트 조작 (List Operations) 및 타입 변환 (Casting)
     # 아래 기능들은 할당문(=) 내부에 포함될 수 있으므로 먼저 처리하거나 치환합니다.
-    
     # 리스트 추가: [리스트] 에 [값] 도 넣어줘
     stripped = re.sub(r'(.*)\s+에\s+(.*)\s+도 넣어줘', r'\1.append(\2)', stripped)
     # 리스트 삭제: [리스트] 에서 [값] 은 빼줘
