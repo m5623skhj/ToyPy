@@ -214,3 +214,11 @@ class FpsControlStatement(ASTNode):
 @dataclass
 class RawExpression(ASTNode):
     source: str = ""
+
+@dataclass
+class PassStatement(ASTNode):
+    pass
+
+@dataclass
+class RaiseStatement(ASTNode):
+    message: str = ""

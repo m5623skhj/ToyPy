@@ -128,6 +128,12 @@ def generate(node: ASTNode, indent: int = 0) -> str:
     if isinstance(node, ContinueStatement):
         return f'{pad}continue'
 
+    if isinstance(node, PassStatement):
+        return f'{pad}pass'
+    
+    if isinstance(node, RaiseStatement):
+        return f'{pad}raise Exception({repr(node.message)})'
+
     if isinstance(node, TryStatement):
         lines = [f'{pad}try:']
         lines += [generate(c, indent + 1) for c in node.body]

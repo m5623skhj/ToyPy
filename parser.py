@@ -251,6 +251,15 @@ def _parse_line(lines: List[str], idx: int) -> Tuple[Optional[ASTNode], int]:
     if stripped == '다음으로 넘어가':
         return ContinueStatement(line=lineno), idx + 1
 
+    # ── pass ──
+    if stripped == "넘어가":
+        return PassStatement(line=lineno), idx + 1
+
+    # ── raise ──
+    m = re.match(r'^오류를 발생시켜줘\s+"([^"]*)"$', stripped)
+    if m:
+        return RaiseStatement(line=lineno, message=m.group(1)), idx + 1
+
     # ── return ──
     m = re.match(r'^결과는\s+(.*)', stripped)
     if m:
