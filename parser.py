@@ -282,7 +282,7 @@ def _parse_line(lines: List[str], idx: int) -> Tuple[Optional[ASTNode], int]:
         return ListAppendStatement(line=lineno, target=m.group(1), value=m.group(2)), idx + 1
 
     # ── 리스트 remove ──
-    m = re.match(r'^(.*)\s+에서\s+(.*)\s+은 빼줘$', stripped)
+    m = re.match(r'^(.*)\s+에서\s+(.*)\s+(?:은|는) 빼줘$', stripped)
     if m:
         return ListRemoveStatement(line=lineno, target=m.group(1), value=m.group(2)), idx + 1
 
