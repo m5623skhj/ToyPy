@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 import sys
 import traceback
-from KeyWords import BLOCK_KEYWORDS
+from typing import Optional
+from KeyWords import BLOCK_KEYWORDS, STATEMENT_KEYWORDS, EXPR_KEYWORDS
 from parser import parse
 from codegen import generate
 from ast_nodes import RawExpression, Program
+from dsl_errors import DSLError, ErrorKind
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.join(BASE_DIR, "Code")
@@ -47,14 +50,184 @@ AUTO_HELPERS = {
     ),
 }
 
+# ── 키워드별 올바른 예시 ────────────────────────────────────────────────
+# _find_nearest_keyword()가 반환하는 값(= KeyWords.py의 실제 키워드)을 키로 사용.
+# 키가 없으면 예시 없이 suggestion만 표시된다.
+_KEYWORD_EXAMPLE: dict[str, str] = {
+    # ── 출력 ──────────────────────────────────────────────────────
+    "화면에 보여줘":            "화면에 보여줘 변수명",
+    "화면에 이어서 보여줘":     "화면에 이어서 보여줘 변수명",
+    "줄 바꿔":                  "줄 바꿔",
+    "으로 보여줘":              "빨간색으로 보여줘 변수명",
+    "으로 이어서 보여줘":       "빨간색으로 이어서 보여줘 변수명",
 
-def needs_colon_hint(line):
-    """블록 구문 키워드가 있는데 ':'로 끝나지 않는 줄 감지"""
+    # ── 조건 ──────────────────────────────────────────────────────
+    "만약에 말이야":            "만약에 말이야 조건:",
+    "아니면":                   "아니면 조건:",
+    "전부 아니면":              "전부 아니면:",
+
+    # ── 반복 ──────────────────────────────────────────────────────
+    "번 반복해":                "3번 반복해:",
+    "영원히 반복해":            "영원히 반복해:",
+    "동안 반복해":              "조건 동안 반복해:",
+    "하나씩 꺼내서":            "목록 에 있는 것들 하나씩 꺼내서 항목 이라고 부르고:",
+    "숫자를 늘려가며":          "1 부터 10 이전까지 하나씩 숫자를 늘려가며 i 이라고 부르고:",
+    "이전까지":                 "1 부터 10 이전까지 하나씩 숫자를 늘려가며 i 이라고 부르고:",
+
+    # ── 흐름 제어 ─────────────────────────────────────────────────
+    "멈춰":                     "멈춰",
+    "다음으로 넘어가":          "다음으로 넘어가",
+
+    # ── 함수 / 클래스 ──────────────────────────────────────────────
+    "이런 기능이 있어":         "이런 기능이 있어 함수명(매개변수):",
+    "이런 설계도가 있어":       "이런 설계도가 있어 클래스명:",
+    "만들 때":                  "만들 때(self, 인자):",
+    "결과는":                   "결과는 반환값",
+
+    # ── 예외 처리 ─────────────────────────────────────────────────
+    "혹시 모르니까 한번 해봐":  "혹시 모르니까 한번 해봐:",
+    "근데 문제가 생기면":       "근데 ValueError 문제가 생기면:",
+    "아무튼 간에":              "아무튼 간에:",
+
+    # ── 변수 / 입력 ───────────────────────────────────────────────
+    "값을 입력할래":            "변수명 은 값을 입력할래",
+
+    # ── 리스트 ────────────────────────────────────────────────────
+    "도 넣어줘":                "목록 에 값 도 넣어줘",
+    "은 빼줘":                  "목록 에서 값 은 빼줘",
+    "맨 앞에":                  "목록 맨 앞에 값 끼워줘",
+    "끝 잘라줘":                "목록 끝 잘라줘",
+
+    # ── 사전 ──────────────────────────────────────────────────────
+    "으로 저장해":              '사전 에 "키" 를 값 으로 저장해',
+    "로 저장해":                '사전 에 "키" 를 값 으로 저장해',
+    "은 지워줘":                '사전 에서 "키" 은 지워줘',
+    "는 지워줘":                '사전 에서 "키" 는 지워줘',
+
+    # ── 파일 ──────────────────────────────────────────────────────
+    "읽기로 열어서":            '파일 "파일명.txt" 읽기로 열어서 f 라고 부르고:',
+    "쓰기로 열어서":            '파일 "파일명.txt" 쓰기로 열어서 f 라고 부르고:',
+    "이어쓰기로 열어서":        '파일 "파일명.txt" 이어쓰기로 열어서 f 라고 부르고:',
+
+    # ── 화면 / 프레임 ─────────────────────────────────────────────
+    "화면 깨끗이":              "화면 깨끗이",
+    "부드럽게 그릴 준비해":     "부드럽게 그릴 준비해",
+    "프레임 시작":              "프레임 시작",
+    "프레임 그려줘":            "프레임 그려줘",
+    "프레임 줄 바꿔":           "프레임 줄 바꿔",
+    "프레임에 보여줘":          "프레임에 보여줘 변수명",
+    "프레임에 이어서 보여줘":   "프레임에 이어서 보여줘 변수명",
+    "위치에 써줘":              "(열, 행) 위치에 써줘 변수명",
+
+    # ── 시간 ──────────────────────────────────────────────────────
+    "밀리초 기다려":            "500 밀리초 기다려",
+    "프레임 유지":              "초당 30 프레임 유지",
+
+    # ── 표현식 키워드 ─────────────────────────────────────────────
+    "를 숫자로 봐줘":           "변수 를 숫자로 봐줘",
+    "를 글자로 봐줘":           "변수 를 글자로 봐줘",
+    "가 얼마나 길어?":          "목록 가 얼마나 길어?",
+    "에 뭐뭐 있어?":            "사전 에 뭐뭐 있어?",
+    "키가 눌렸어?":             "키가 눌렸어?",
+    "눌린 키가 뭐야?":          "눌린 키가 뭐야?",
+    "받아서":                   "x 받아서 x * x 주는 것",
+    "주는 것":                  "x 받아서 x * x 주는 것",
+    "무작위":                   "1 부터 10 무작위",
+    "번째부터":                 "목록 의 2번째부터 5번째까지",
+    "번째까지":                 "목록 의 2번째부터 5번째까지",
+    "그리고":                   "조건1 그리고 조건2",
+    "또는":                     "조건1 또는 조건2",
+    "아님":                     "아님 조건",
+    "진짜야":                   "변수 는 진짜야",
+    "가짜야":                   "변수 는 가짜야",
+}
+
+
+# ──────────────────────────────────────────────────────────────
+# 에러 생성 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+def _find_nearest_keyword(text: str) -> Optional[str]:
+    """
+    입력 줄과 가장 유사한 DSL 키워드를 반환.
+
+    1차: BLOCK/STATEMENT/EXPR 키워드 전체에서 줄 안에 부분 포함되는 것을 반환.
+         길이 긴 키워드부터 확인해 오탐을 줄인다.
+    2차: 공통 글자 수 기준 최근접. 단, 공통 글자가 2개 미만이면 None 반환
+         (관련 없는 키워드를 억지로 추천하지 않음).
+    """
+    all_kw = BLOCK_KEYWORDS + STATEMENT_KEYWORDS + EXPR_KEYWORDS
+    text_stripped = text.strip()
+
+    # 1차: 긴 키워드부터 부분 포함 확인
+    for kw in sorted(all_kw, key=len, reverse=True):
+        if kw in text_stripped:
+            return kw
+
+    # 2차: 공통 고유 글자 수 기준
+    def common_chars(a: str, b: str) -> int:
+        return sum(1 for c in set(a) if c in b)
+
+    scored = [(common_chars(kw, text_stripped), kw) for kw in all_kw]
+    best_score, best_kw = max(scored, key=lambda x: x[0], default=(0, None))
+
+    # 공통 글자 2개 미만이면 추천하지 않음
+    return best_kw if best_score >= 2 else None
+
+
+def _make_raw_error(line_no: int, source: str) -> DSLError:
+    """인식 못한 줄 → 구체적인 에러 객체 생성"""
+    nearest = _find_nearest_keyword(source)
+    suggestion = (
+        f"'{nearest}' 문법을 쓰려고 하신 건 아닌가요?"
+        if nearest else
+        "ToyPy 문법이 맞는지 확인하세요."
+    )
+    hint = _KEYWORD_EXAMPLE.get(nearest, "") if nearest else ""
+
+    return DSLError(
+        kind=ErrorKind.UNKNOWN_COMMAND,
+        line_no=line_no,
+        source_line=source,
+        message="어떤 ToyPy 문법과도 일치하지 않는 줄입니다.",
+        suggestion=suggestion,
+        hint_code=hint,
+    )
+
+
+def _make_colon_error(line_no: int, source: str) -> DSLError:
+    """콜론 누락 줄 → 에러 객체 생성"""
+    return DSLError(
+        kind=ErrorKind.MISSING_COLON,
+        line_no=line_no,
+        source_line=source,
+        message="블록을 시작하는 문법인데 줄 끝에 ':'이 없습니다.",
+        suggestion="줄 맨 끝에 ':' 를 붙여주세요.",
+        hint_code=source.strip() + ":",
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 파싱 관련 유틸
+# ──────────────────────────────────────────────────────────────
+
+def needs_colon_hint(line: str) -> bool:
+    """
+    블록 구문 키워드가 있는데 ':'로 끝나지 않는 줄을 감지한다.
+
+    수정: 문자열 리터럴("...") 안에 있는 키워드는 무시한다.
+    예) 화면에 보여줘 "아니면 뭐야"  → '아니면'이 문자열 안에 있으므로 오탐하지 않음.
+    """
     stripped = line.strip()
     if not stripped or stripped.startswith("이건 상관 없는 이야기인데"):
         return False
+    if stripped.endswith(":"):
+        return False
+
+    # 문자열 리터럴 제거 후 키워드 탐색
+    cleaned = re.sub(r'"[^"]*"', '', stripped)
     for kw in BLOCK_KEYWORDS:
-        if kw in stripped and not stripped.endswith(":"):
+        if kw in cleaned:
             return True
     return False
 
@@ -140,6 +313,10 @@ def transform_code(code):
     return py_code, warnings, colon_hints
 
 
+# ──────────────────────────────────────────────────────────────
+# 파일 처리
+# ──────────────────────────────────────────────────────────────
+
 def ensure_output_dir():
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
@@ -169,11 +346,21 @@ def process_file(filepath):
         print(f"\n⚠️  [{filename}] 파일이 비어있습니다. 건너뜁니다.")
         return
 
+    source_lines = code.split('\n')  # 에러 컨텍스트 출력용
+
     # 변환
     try:
-        py_code, warnings, colon_hints = transform_code(code)
+        py_code, raw_warnings, colon_hints = transform_code(code)
     except RuntimeError as e:
-        print(f"\n❌ [{filename}] 변환 실패: {e}")
+        err = DSLError(
+            kind=ErrorKind.PARSE_FAILED,
+            line_no=0,
+            source_line="",
+            message=str(e),
+            suggestion="문법 오류가 있는지 처음부터 확인해보세요.",
+        )
+        print(f"\n❌ [{filename}] 변환 실패")
+        print(err.format())
         return
     except Exception as e:
         print(f"\n❌ [{filename}] 예기치 않은 오류:")
@@ -189,36 +376,50 @@ def process_file(filepath):
         print(f"\n❌ [{filename}] 파일 저장 실패: {e}")
         return
 
-    # 결과 출력
-    print(f"\n{'='*50}")
-    print(f"  ✔ [{filename}] → [{name}.py] 생성 완료")
-    print(f"{'='*50}")
+    # ── 에러/경고 수집 ──────────────────────────────────────
+    all_errors: list[DSLError] = []
+
+    for line_no, source in raw_warnings:
+        all_errors.append(_make_raw_error(line_no, source))
+
+    for line_no, source in colon_hints:
+        all_errors.append(_make_colon_error(line_no, source))
+
+    all_errors.sort(key=lambda e: e.line_no)
+
+    # ── 결과 출력 ────────────────────────────────────────────
+    print(f"\n{'═'*52}")
+    if all_errors:
+        print(f"  ⚠️  [{filename}] 변환 완료 (문제 {len(all_errors)}건 발견)")
+    else:
+        print(f"  ✔  [{filename}] → [{name}.py] 변환 완료")
+    print(f"{'═'*52}")
+
     print(f"\n📄 변환된 Python 코드:")
     print("─" * 40)
     print(py_code)
     print("─" * 40)
 
-    has_issues = False
-
-    if warnings:
-        has_issues = True
-        print(f"\n⚠️  변환되지 않은 의심 라인 ({len(warnings)}건):")
-        for line_no, content in warnings:
-            print(f"   {line_no}번째 줄 → {content.strip()}")
-        print("   💡 한글 문법이 맞는지 확인하세요. 오타가 있으면 그대로 출력됩니다.")
-
-    if colon_hints:
-        has_issues = True
-        print(f"\n💡 문법 힌트 ({len(colon_hints)}건):")
-        for line_no, content in colon_hints:
-            print(f"   {line_no}번째 줄 → ':' 가 빠진 것 같습니다")
-            print(f"      {content.strip()}")
-
-    if not has_issues:
-        print("\n✔ 전체 변환 정상 — 문제가 발견되지 않았습니다.")
+    if all_errors:
+        print(f"\n{'━'*52}")
+        print(f"  🚨 발견된 문제 목록 ({len(all_errors)}건)")
+        print(f"{'━'*52}")
+        for err in all_errors:
+            print(err.format(source_lines))
+        # 에러 종류별 요약
+        kinds: dict[str, int] = {}
+        for e in all_errors:
+            kinds[e.kind.label] = kinds.get(e.kind.label, 0) + 1
+        print(f"\n  📊 요약: " + " / ".join(f"{k} {v}건" for k, v in kinds.items()))
+    else:
+        print("\n  ✔ 전체 변환 정상 — 문제가 발견되지 않았습니다.")
 
     print()
 
+
+# ──────────────────────────────────────────────────────────────
+# 진입점
+# ──────────────────────────────────────────────────────────────
 
 def main():
     ensure_output_dir()
