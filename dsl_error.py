@@ -21,6 +21,7 @@ class DSLError:
     kind: ErrorKind
     line_no: int
     source_line: str          # 실제 소스 줄
+    column_no: int = 1
     message: str = ""
     suggestion: str = ""      # 어떻게 고치면 되는지
     hint_code: str = ""       # 올바른 예시 코드
@@ -35,7 +36,10 @@ class DSLError:
             f"  {self.kind.icon} [{self.kind.label}]  "
             f"{'─' * max(0, 46 - len(self.kind.label))}"
         )
-        out.append(f"  📍 {self.line_no}번째 줄")
+        location = f"{self.line_no}번째 줄"
+        if self.column_no > 0:
+            location += f", {self.column_no}번째 칸"
+        out.append(f"  📍 {location}")
         out.append("")
 
         # ── 소스 컨텍스트 (앞뒤 줄 포함) ──────────────────
@@ -49,10 +53,9 @@ class DSLError:
                 # prefix 2 + prefix 2 + lineno 3 + " │ " 3 = 10칸
                 out.append(f"  {prefix}{i+1:3d} │ {source_lines[i].rstrip()}")
                 if is_target:
-                    # 캐럿 줄: "        │ " (공백 8 + "│ " 2 = 10칸, 위 줄과 정렬 일치)
-                    indent = len(source_lines[i]) - len(source_lines[i].lstrip())
-                    caret_len = max(1, len(self.source_line.strip()))
-                    out.append(f"        │ {' ' * indent}{'^' * caret_len}")
+                    caret_column = max(1, self.column_no)
+                    caret_padding = max(0, caret_column - 1)
+                    out.append(f"        │ {' ' * caret_padding}^")
         else:
             # source_lines 없으면 source_line만 표시
             out.append(f"        │ {self.source_line.rstrip()}")

@@ -7,8 +7,16 @@ from typing import Optional
 from KeyWords import BLOCK_KEYWORDS, STATEMENT_KEYWORDS, EXPR_KEYWORDS
 from parser import parse
 from codegen import generate
-from ast_nodes import RawExpression, Program
-from dsl_errors import DSLError, ErrorKind
+from ast_nodes import (
+    Program, RawExpression, Assignment, SelfAssignment, ReturnStatement,
+    IfStatement, ForRange, ForEach, WhileStatement, PrintStatement,
+    ColorPrintStatement, DictDefStatement, DictStoreStatement,
+    DictDeleteStatement, ListAppendStatement, ListRemoveStatement,
+    ListInsertStatement, ListPopStatement, FrameAppendStatement,
+    CursorWriteStatement, SleepStatement, FpsControlStatement,
+)
+from dsl_error import DSLError, ErrorKind
+from expr_parser import diagnose as diagnose_expr, ParseIssue
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_DIR = os.path.join(BASE_DIR, "Code")
@@ -207,6 +215,27 @@ def _make_colon_error(line_no: int, source: str) -> DSLError:
     )
 
 
+def _make_expression_error(line_no: int, source: str, issue: ParseIssue) -> DSLError:
+    """표현식 문법 오류를 사용자용 에러 객체로 변환한다."""
+    suggestion = "표현식을 완성한 뒤 다시 실행해주세요."
+    if issue.expected:
+        suggestion = f"이 위치에는 {issue.expected} 형태가 와야 합니다."
+
+    hint = ""
+    if issue.token == "EOF":
+        hint = source.rstrip() + " ..."
+
+    return DSLError(
+        kind=ErrorKind.PARSE_FAILED,
+        line_no=line_no,
+        column_no=issue.column,
+        source_line=source,
+        message=issue.message,
+        suggestion=suggestion,
+        hint_code=hint,
+    )
+
+
 # ──────────────────────────────────────────────────────────────
 # 파싱 관련 유틸
 # ──────────────────────────────────────────────────────────────
@@ -253,6 +282,84 @@ def collect_raw_warnings(ast_node):
     return warnings
 
 
+def _iter_expression_sources(ast_node):
+    """AST 노드에서 문법 검사가 필요한 표현식 문자열을 순회한다."""
+    if isinstance(ast_node, Program):
+        for child in ast_node.body:
+            yield from _iter_expression_sources(child)
+        return
+
+    expression_fields = []
+
+    if isinstance(ast_node, (Assignment, SelfAssignment, ReturnStatement)):
+        expression_fields.append(ast_node.value)
+    elif isinstance(ast_node, IfStatement):
+        expression_fields.append(ast_node.condition)
+        for elif_clause in ast_node.elifs:
+            expression_fields.append(elif_clause.condition)
+            yield from _iter_expression_sources(elif_clause)
+    elif isinstance(ast_node, ForRange):
+        expression_fields.extend([ast_node.start, ast_node.end])
+    elif isinstance(ast_node, ForEach):
+        expression_fields.append(ast_node.iterable)
+    elif isinstance(ast_node, WhileStatement):
+        expression_fields.append(ast_node.condition)
+    elif isinstance(ast_node, PrintStatement):
+        expression_fields.append(ast_node.value)
+    elif isinstance(ast_node, ColorPrintStatement):
+        expression_fields.append(ast_node.value)
+    elif isinstance(ast_node, DictDefStatement):
+        expression_fields.append(ast_node.value)
+    elif isinstance(ast_node, DictStoreStatement):
+        expression_fields.extend([ast_node.target, ast_node.key, ast_node.value])
+    elif isinstance(ast_node, DictDeleteStatement):
+        expression_fields.extend([ast_node.target, ast_node.key])
+    elif isinstance(ast_node, ListAppendStatement):
+        expression_fields.extend([ast_node.target, ast_node.value])
+    elif isinstance(ast_node, ListRemoveStatement):
+        expression_fields.extend([ast_node.target, ast_node.value])
+    elif isinstance(ast_node, ListInsertStatement):
+        expression_fields.extend([ast_node.target, ast_node.value])
+    elif isinstance(ast_node, ListPopStatement):
+        expression_fields.append(ast_node.target)
+    elif isinstance(ast_node, FrameAppendStatement):
+        expression_fields.append(ast_node.value)
+    elif isinstance(ast_node, CursorWriteStatement):
+        expression_fields.extend([ast_node.x, ast_node.y, ast_node.value])
+    elif isinstance(ast_node, SleepStatement):
+        expression_fields.append(ast_node.ms)
+    elif isinstance(ast_node, FpsControlStatement):
+        expression_fields.append(ast_node.fps)
+    elif isinstance(ast_node, RawExpression):
+        expression_fields.append(ast_node.source)
+
+    for expr_source in expression_fields:
+        if expr_source and expr_source.strip():
+            yield ast_node.line, expr_source
+
+    for attr in ("body", "else_body", "except_body", "finally_body"):
+        children = getattr(ast_node, attr, None)
+        if isinstance(children, list):
+            for child in children:
+                yield from _iter_expression_sources(child)
+
+
+def collect_expression_errors(ast_node):
+    """AST 노드에서 표현식 문법 오류를 수집한다."""
+    errors = []
+    seen = set()
+    for line_no, expr_source in _iter_expression_sources(ast_node):
+        issue = diagnose_expr(expr_source)
+        if issue is None:
+            continue
+        key = (line_no, expr_source, issue.column, issue.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        errors.append(_make_expression_error(line_no, expr_source, issue))
+    return errors
+
+
 def get_required_imports(code):
     required = []
     seen = set()
@@ -284,10 +391,13 @@ def transform_code(code):
     except Exception as e:
         raise RuntimeError(f"코드 생성 단계에서 오류 발생: {e}") from e
 
+    expr_errors = collect_expression_errors(ast)
+    expr_error_lines = {err.line_no for err in expr_errors}
+
     # RawExpression 경고 (한글 포함 줄만)
     warnings = []
     for line_no, source in collect_raw_warnings(ast):
-        if any('\uac00' <= ch <= '\ud7a3' for ch in source):
+        if line_no not in expr_error_lines and any('\uac00' <= ch <= '\ud7a3' for ch in source):
             warnings.append((line_no, source))
 
     # 콜론 힌트
@@ -310,7 +420,7 @@ def transform_code(code):
     if prefix_lines:
         py_code = '\n'.join(prefix_lines) + '\n' + py_code
 
-    return py_code, warnings, colon_hints
+    return py_code, warnings, colon_hints, expr_errors
 
 
 # ──────────────────────────────────────────────────────────────
@@ -350,7 +460,7 @@ def process_file(filepath):
 
     # 변환
     try:
-        py_code, raw_warnings, colon_hints = transform_code(code)
+        py_code, raw_warnings, colon_hints, expr_errors = transform_code(code)
     except RuntimeError as e:
         err = DSLError(
             kind=ErrorKind.PARSE_FAILED,
@@ -367,15 +477,6 @@ def process_file(filepath):
         traceback.print_exc()
         return
 
-    # 저장
-    output_path = os.path.join(OUTPUT_DIR, name + ".py")
-    try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(py_code)
-    except Exception as e:
-        print(f"\n❌ [{filename}] 파일 저장 실패: {e}")
-        return
-
     # ── 에러/경고 수집 ──────────────────────────────────────
     all_errors: list[DSLError] = []
 
@@ -385,14 +486,30 @@ def process_file(filepath):
     for line_no, source in colon_hints:
         all_errors.append(_make_colon_error(line_no, source))
 
-    all_errors.sort(key=lambda e: e.line_no)
+    all_errors.extend(expr_errors)
+
+    all_errors.sort(key=lambda e: (e.line_no, e.column_no, e.kind.label))
+    has_blocking_errors = bool(all_errors)
+
+    output_path = os.path.join(OUTPUT_DIR, name + ".py")
+    file_written = False
+    if not has_blocking_errors:
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(py_code)
+            file_written = True
+        except Exception as e:
+            print(f"\n❌ [{filename}] 파일 저장 실패: {e}")
+            return
 
     # ── 결과 출력 ────────────────────────────────────────────
     print(f"\n{'═'*52}")
-    if all_errors:
-        print(f"  ⚠️  [{filename}] 변환 완료 (문제 {len(all_errors)}건 발견)")
+    if has_blocking_errors:
+        print(f"  ⚠️  [{filename}] 문법 오류 {len(all_errors)}건 발견")
+        print(f"  ⛔ [{name}.py] 파일은 생성되거나 수정되지 않았습니다.")
     else:
-        print(f"  ✔  [{filename}] → [{name}.py] 변환 완료")
+        status = "저장 완료" if file_written else "변환 완료"
+        print(f"  ✔  [{filename}] → [{name}.py] {status}")
     print(f"{'═'*52}")
 
     print(f"\n📄 변환된 Python 코드:")

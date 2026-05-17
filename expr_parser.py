@@ -33,6 +33,16 @@ COLORS = {
 class Tok:
     type: str
     value: str
+    start: int = 0
+    end: int = 0
+
+
+@dataclass
+class ParseIssue:
+    message: str
+    token: str = ""
+    expected: str = ""
+    column: int = 1
 
 
 # 합성 키워드 (공백·물음표 제외한 순수 단어 시퀀스로 매칭)
@@ -139,7 +149,7 @@ def _lex_raw(src: str) -> List[Tok]:
                     else:
                         j += 1
                 j = min(j + 1, n)
-                toks.append(Tok("STRING", src[i:j]))
+                toks.append(Tok("STRING", src[i:j], i, j))
                 i = j
                 continue
         # 문자열
@@ -152,42 +162,42 @@ def _lex_raw(src: str) -> List[Tok]:
                 else:
                     j += 1
             j = min(j + 1, n)
-            toks.append(Tok("STRING", src[i:j]))
+            toks.append(Tok("STRING", src[i:j], i, j))
             i = j
             continue
         # 숫자
         m = _NUM_RE.match(src, i)
         if m:
-            toks.append(Tok("NUMBER", m.group(0)))
+            toks.append(Tok("NUMBER", m.group(0), i, m.end()))
             i = m.end()
             continue
         # 구두점
         if c in '()[]{},.:':
             mp = {'(':'LPAREN',')':'RPAREN','[':'LBRACKET',']':'RBRACKET',
                   '{':'LBRACE','}':'RBRACE',',':'COMMA','.':'DOT',':':'COLON'}
-            toks.append(Tok(mp[c], c))
+            toks.append(Tok(mp[c], c, i, i + 1))
             i += 1
             continue
         # 2글자 연산자
         if i + 1 < n and src[i:i+2] in _OPS_2:
-            toks.append(Tok("OP", src[i:i+2]))
+            toks.append(Tok("OP", src[i:i+2], i, i + 2))
             i += 2
             continue
         # 1글자 연산자
         if c in _OPS_1:
-            toks.append(Tok("OP", c))
+            toks.append(Tok("OP", c, i, i + 1))
             i += 1
             continue
         # ? (후방 물음표, 키워드 후처리에서 사용)
         if c == '?':
-            toks.append(Tok("QMARK", "?"))
+            toks.append(Tok("QMARK", "?", i, i + 1))
             i += 1
             continue
         # ! (not-equals 단일은 허용 안 함 — 이미 != 처리)
         # 식별자 (영문/Korean/_/숫자 — 단 시작은 숫자 불가)
         if _ID_START_RE.match(c):
             name, j = _munch_ident(src, i, n)
-            toks.append(Tok("IDENT", name))
+            toks.append(Tok("IDENT", name, i, j))
             i = j
             continue
         # 그 외 — 스킵
@@ -242,28 +252,59 @@ def _collapse_kw(raw: List[Tok]) -> List[Tok]:
         if matched:
             seq, ttype = matched
             phrase_str = ' '.join(e[1] for e in seq)
-            out.append(Tok(ttype, phrase_str))
+            out.append(Tok(ttype, phrase_str, raw[i].start, raw[i + len(seq) - 1].end))
             i += len(seq)
             continue
         # Python 키워드 변환
         t = raw[i]
         if t.type == "IDENT" and t.value in _PY_KW:
-            out.append(Tok(_PY_KW[t.value], t.value))
+            out.append(Tok(_PY_KW[t.value], t.value, t.start, t.end))
             i += 1
             continue
         # 색상 식별자
         if t.type == "IDENT" and t.value in COLORS:
-            out.append(Tok("COLOR", t.value))
+            out.append(Tok("COLOR", t.value, t.start, t.end))
             i += 1
             continue
         out.append(t)
         i += 1
-    out.append(Tok("EOF", ""))
+    eof_at = raw[-1].end if raw else 0
+    out.append(Tok("EOF", "", eof_at, eof_at))
     return out
 
 
 def tokenize(src: str) -> List[Tok]:
     return _collapse_kw(_lex_raw(src))
+
+
+def diagnose(src: str) -> Optional[ParseIssue]:
+    """표현식 문법을 검사하고 실패 원인을 구조화해 반환한다."""
+    if not src or not src.strip():
+        return None
+
+    try:
+        toks = tokenize(src)
+        parser = Parser(toks)
+        parser.parse_toplevel()
+        trailing = parser.peek()
+        if trailing.type != "EOF":
+            actual = trailing.value or trailing.type
+            return ParseIssue(
+                message=f"'{actual}' 뒤에 해석되지 않은 토큰이 남아 있습니다.",
+                token=actual,
+                expected="표현식 종료",
+                column=trailing.start + 1,
+            )
+        return None
+    except _ParseError as exc:
+        token = exc.token or Tok("EOF", "", len(src), len(src))
+        actual = token.value or token.type or "EOF"
+        return ParseIssue(
+            message=exc.message,
+            token=actual,
+            expected=exc.expected,
+            column=token.start + 1,
+        )
 
 
 # ══════════════════════════════════════════════
@@ -395,7 +436,16 @@ class EColorCall(ENode):
 # 파서 (Pratt-style)
 # ══════════════════════════════════════════════
 class _ParseError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        token: Optional[Tok] = None,
+        expected: str = "",
+    ):
+        super().__init__(message)
+        self.message = message
+        self.token = token
+        self.expected = expected
 
 
 class Parser:
@@ -412,7 +462,13 @@ class Parser:
     def eat(self, *types: str) -> Tok:
         t = self.toks[self.pos]
         if types and t.type not in types:
-            raise _ParseError(f"expected {types}, got {t}")
+            expected = " 또는 ".join(types)
+            actual = t.value or t.type
+            raise _ParseError(
+                f"'{actual}' 위치에서 문법을 이어갈 수 없습니다.",
+                token=t,
+                expected=expected,
+            )
         self.pos += 1
         return t
 
@@ -570,7 +626,11 @@ class Parser:
                 hi = self.parse_add()
                 self.eat("KW_TO")
                 if self.peek().type != "KW_RAND":
-                    raise _ParseError("expected 무작위 after 까지")
+                    raise _ParseError(
+                        "'무작위' 키워드가 빠졌습니다.",
+                        token=self.peek(),
+                        expected="KW_RAND",
+                    )
                 self.eat()
                 node = ERandom(lo=node, hi=hi)
             else:
@@ -676,7 +736,12 @@ class Parser:
             self.eat("RBRACE")
             return EDict(pairs=pairs)
 
-        raise _ParseError(f"unexpected token {t}")
+        actual = t.value or t.type
+        raise _ParseError(
+            f"'{actual}'은(는) 이 위치에서 올 수 없습니다.",
+            token=t,
+            expected="NUMBER, STRING, IDENT, LPAREN, LBRACKET 또는 LBRACE",
+        )
 
     def _parse_paren_or_lambda(self) -> ENode:
         """`(...)` 뒤에 '받아서'가 오면 람다로 파싱, 아니면 group/tuple."""
@@ -724,7 +789,11 @@ class Parser:
             if t.type == "DOT":
                 self.eat()
                 if self.peek().type != "IDENT":
-                    raise _ParseError("expected attribute name after '.'")
+                    raise _ParseError(
+                        "'.' 뒤에 속성 이름이 필요합니다.",
+                        token=self.peek(),
+                        expected="IDENT",
+                    )
                 name = self.eat().value
                 node = EAttr(obj=node, name=name)
             elif t.type == "LPAREN":
