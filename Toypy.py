@@ -185,6 +185,10 @@ def _find_nearest_keyword(text: str) -> Optional[str]:
 
 def _make_raw_error(line_no: int, source: str) -> DSLError:
     """인식 못한 줄 → 구체적인 에러 객체 생성"""
+    specialized = _make_statement_pattern_error(line_no, source)
+    if specialized is not None:
+        return specialized
+
     nearest = _find_nearest_keyword(source)
     suggestion = (
         f"'{nearest}' 문법을 쓰려고 하신 건 아닌가요?"
@@ -203,6 +207,55 @@ def _make_raw_error(line_no: int, source: str) -> DSLError:
     )
 
 
+def _make_statement_pattern_error(line_no: int, source: str) -> Optional[DSLError]:
+    """지원하는 문장형 DSL과 유사하지만 형식이 틀린 줄을 더 구체적으로 안내한다."""
+    stripped = source.strip()
+    statement_patterns = [
+        (
+            "화면에 보여줘",
+            "출력 문장 형식이 어긋났습니다.",
+            "뒤에 출력할 값을 한 칸 띄워서 적어주세요.",
+            '화면에 보여줘 "안녕"',
+        ),
+        (
+            "화면에 이어서 보여줘",
+            "이어쓰기 출력 문장 형식이 어긋났습니다.",
+            "뒤에 이어서 출력할 값을 적어주세요.",
+            '화면에 이어서 보여줘 "계속"',
+        ),
+        (
+            "파일",
+            "파일 열기 문장 형식이 어긋났습니다.",
+            "'파일 ... 읽기/쓰기/이어쓰기로 열어서 ... 라고 부르고:' 형식을 확인해주세요.",
+            '파일 "demo.txt" 읽기로 열어서 f 라고 부르고:',
+        ),
+        (
+            "저장해",
+            "사전 저장 문장 형식이 어긋났습니다.",
+            "'사전 에 키 를 값 으로 저장해' 순서를 확인해주세요.",
+            '사전 에 "키" 를 값 으로 저장해',
+        ),
+        (
+            "보여줘",
+            "출력 관련 문장 형식이 어긋났습니다.",
+            "'화면에 보여줘 ...' 또는 '프레임에 보여줘 ...' 형식을 확인해주세요.",
+            '화면에 보여줘 값',
+        ),
+    ]
+
+    for marker, message, suggestion, hint in statement_patterns:
+        if marker in stripped:
+            return DSLError(
+                kind=ErrorKind.UNKNOWN_COMMAND,
+                line_no=line_no,
+                source_line=source,
+                message=message,
+                suggestion=suggestion,
+                hint_code=hint,
+            )
+    return None
+
+
 def _make_colon_error(line_no: int, source: str) -> DSLError:
     """콜론 누락 줄 → 에러 객체 생성"""
     return DSLError(
@@ -217,6 +270,18 @@ def _make_colon_error(line_no: int, source: str) -> DSLError:
 
 def _make_expression_error(line_no: int, source: str, issue: ParseIssue) -> DSLError:
     """표현식 문법 오류를 사용자용 에러 객체로 변환한다."""
+    statement_like = _make_statement_pattern_error(line_no, source)
+    if statement_like is not None:
+        return DSLError(
+            kind=ErrorKind.PARSE_FAILED,
+            line_no=line_no,
+            column_no=issue.column,
+            source_line=source,
+            message=statement_like.message,
+            suggestion=statement_like.suggestion,
+            hint_code=statement_like.hint_code,
+        )
+
     suggestion = "표현식을 완성한 뒤 다시 실행해주세요."
     if issue.expected:
         suggestion = f"이 위치에는 {issue.expected} 형태가 와야 합니다."
@@ -492,6 +557,7 @@ def process_file(filepath):
     has_blocking_errors = bool(all_errors)
 
     output_path = os.path.join(OUTPUT_DIR, name + ".py")
+    output_file_exists = os.path.exists(output_path)
     file_written = False
     if not has_blocking_errors:
         try:
@@ -506,7 +572,10 @@ def process_file(filepath):
     print(f"\n{'═'*52}")
     if has_blocking_errors:
         print(f"  ⚠️  [{filename}] 문법 오류 {len(all_errors)}건 발견")
-        print(f"  ⛔ [{name}.py] 파일은 생성되거나 수정되지 않았습니다.")
+        if output_file_exists:
+            print(f"  ⛔ [{name}.py] 기존 파일은 유지되었고 수정되지 않았습니다.")
+        else:
+            print(f"  ⛔ [{name}.py] 출력 파일은 생성되지 않았습니다.")
     else:
         status = "저장 완료" if file_written else "변환 완료"
         print(f"  ✔  [{filename}] → [{name}.py] {status}")
