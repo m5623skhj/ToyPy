@@ -6,7 +6,7 @@ import traceback
 from typing import Optional
 from KeyWords import BLOCK_KEYWORDS, STATEMENT_KEYWORDS, EXPR_KEYWORDS
 from parser import parse
-from codegen import generate
+from codegen import generate_with_map
 from ast_nodes import (
     Program, RawExpression, Assignment, SelfAssignment, ReturnStatement,
     IfStatement, ForRange, ForEach, WhileStatement, PrintStatement,
@@ -445,16 +445,105 @@ def get_required_helpers(code):
     return required
 
 
-def transform_code(code):
+def _flatten_prefix_blocks(blocks: list[str]) -> list[str]:
+    lines: list[str] = []
+    for block in blocks:
+        lines.extend(block.split('\n'))
+        lines.append('')
+    return lines
+
+
+def _build_runtime_traceback_lines(
+    dsl_name: str,
+    source_lines: list[str],
+    line_map: list[int],
+) -> list[str]:
+    return [
+        "import os as _toypy_os",
+        "import sys as _toypy_sys",
+        "import traceback as _toypy_traceback",
+        "try:",
+        "    import threading as _toypy_threading",
+        "except ImportError:",
+        "    _toypy_threading = None",
+        "",
+        f"__TOYPY_DSL_FILE__ = {dsl_name!r}",
+        f"__TOYPY_DSL_SOURCE_LINES__ = {source_lines!r}",
+        f"__TOYPY_PYTHON_TO_DSL_LINE_MAP__ = {line_map!r}",
+        "__TOYPY_ORIGINAL_EXCEPTHOOK__ = _toypy_sys.excepthook",
+        "__TOYPY_GENERATED_FILE__ = _toypy_os.path.normcase(_toypy_os.path.abspath(__file__))",
+        "",
+        "def _toypy_lookup_dsl_line(python_line_no):",
+        "    if 1 <= python_line_no <= len(__TOYPY_PYTHON_TO_DSL_LINE_MAP__):",
+        "        return __TOYPY_PYTHON_TO_DSL_LINE_MAP__[python_line_no - 1]",
+        "    return 0",
+        "",
+        "def _toypy_write_frame(frame):",
+        "    frame_filename = _toypy_os.path.normcase(_toypy_os.path.abspath(frame.filename))",
+        "    if frame_filename == __TOYPY_GENERATED_FILE__:",
+        "        dsl_line = _toypy_lookup_dsl_line(frame.lineno)",
+        "        if dsl_line:",
+        "            _toypy_sys.stderr.write(",
+        "                f'  DSL File \"{__TOYPY_DSL_FILE__}\", line {dsl_line}, in {frame.name} '",
+        "                f'[generated Python line {frame.lineno}]\\n'",
+        "            )",
+        "            if 1 <= dsl_line <= len(__TOYPY_DSL_SOURCE_LINES__):",
+        "                source_line = __TOYPY_DSL_SOURCE_LINES__[dsl_line - 1].rstrip()",
+        "                if source_line:",
+        "                    _toypy_sys.stderr.write(f'    {source_line}\\n')",
+        "            return",
+        "    _toypy_sys.stderr.write(f'  File \"{frame.filename}\", line {frame.lineno}, in {frame.name}\\n')",
+        "    if frame.line:",
+        "        _toypy_sys.stderr.write(f'    {frame.line.strip()}\\n')",
+        "",
+        "def _toypy_excepthook(exc_type, exc_value, exc_tb):",
+        "    if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):",
+        "        __TOYPY_ORIGINAL_EXCEPTHOOK__(exc_type, exc_value, exc_tb)",
+        "        return",
+        "    try:",
+        "        _toypy_sys.stderr.write('Traceback (most recent call last):\\n')",
+        "        for frame in _toypy_traceback.extract_tb(exc_tb):",
+        "            _toypy_write_frame(frame)",
+        "        for line in _toypy_traceback.format_exception_only(exc_type, exc_value):",
+        "            _toypy_sys.stderr.write(line)",
+        "    except Exception:",
+        "        __TOYPY_ORIGINAL_EXCEPTHOOK__(exc_type, exc_value, exc_tb)",
+        "",
+        "if _toypy_threading is not None and hasattr(_toypy_threading, 'excepthook'):",
+        "    __TOYPY_ORIGINAL_THREADING_EXCEPTHOOK__ = _toypy_threading.excepthook",
+        "",
+        "    def _toypy_threading_excepthook(args):",
+        "        if issubclass(args.exc_type, (KeyboardInterrupt, SystemExit)):",
+        "            __TOYPY_ORIGINAL_THREADING_EXCEPTHOOK__(args)",
+        "            return",
+        "        try:",
+        "            thread_name = getattr(args.thread, 'name', '<unknown>')",
+        "            _toypy_sys.stderr.write(f'Exception in thread \"{thread_name}\":\\n')",
+        "            _toypy_excepthook(args.exc_type, args.exc_value, args.exc_traceback)",
+        "        except Exception:",
+        "            __TOYPY_ORIGINAL_THREADING_EXCEPTHOOK__(args)",
+        "",
+        "    _toypy_threading.excepthook = _toypy_threading_excepthook",
+        "",
+        "_toypy_sys.excepthook = _toypy_excepthook",
+        "",
+    ]
+
+
+def transform_code(code, dsl_name: str = "<unknown>"):
     try:
         ast = parse(code)
     except Exception as e:
         raise RuntimeError(f"파싱 단계에서 오류 발생: {e}") from e
 
     try:
-        py_code = generate(ast)
+        rendered_lines = generate_with_map(ast)
     except Exception as e:
         raise RuntimeError(f"코드 생성 단계에서 오류 발생: {e}") from e
+
+    py_body_lines = [text for text, _ in rendered_lines]
+    py_body_line_map = [dsl_line for _, dsl_line in rendered_lines]
+    py_code = '\n'.join(py_body_lines)
 
     expr_errors = collect_expression_errors(ast)
     expr_error_lines = {err.line_no for err in expr_errors}
@@ -473,17 +562,16 @@ def transform_code(code):
 
     # 자동 import / helper 주입
     required_imports = get_required_imports(code)
-    existing_imports = [l.strip() for l in py_code.split('\n') if l.strip().startswith("import ")]
+    existing_imports = [line.strip() for line in py_body_lines if line.strip().startswith("import ")]
     auto_to_add = [imp for imp in required_imports if imp not in existing_imports]
     required_helpers = get_required_helpers(code)
 
-    prefix_lines = []
-    if auto_to_add:
-        prefix_lines += auto_to_add + ['']
-    if required_helpers:
-        prefix_lines += required_helpers + ['']
-    if prefix_lines:
-        py_code = '\n'.join(prefix_lines) + '\n' + py_code
+    auto_prefix_lines = _flatten_prefix_blocks(auto_to_add + required_helpers)
+    source_lines = code.split('\n')
+    runtime_line_count = len(_build_runtime_traceback_lines(dsl_name, source_lines, []))
+    full_line_map = ([0] * (runtime_line_count + len(auto_prefix_lines))) + py_body_line_map
+    runtime_prefix_lines = _build_runtime_traceback_lines(dsl_name, source_lines, full_line_map)
+    py_code = '\n'.join(runtime_prefix_lines + auto_prefix_lines + py_body_lines)
 
     return py_code, warnings, colon_hints, expr_errors
 
@@ -525,7 +613,7 @@ def process_file(filepath):
 
     # 변환
     try:
-        py_code, raw_warnings, colon_hints, expr_errors = transform_code(code)
+        py_code, raw_warnings, colon_hints, expr_errors = transform_code(code, dsl_name=os.path.join("Code", filename))
     except RuntimeError as e:
         err = DSLError(
             kind=ErrorKind.PARSE_FAILED,
