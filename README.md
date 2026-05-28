@@ -53,7 +53,7 @@ print("안녕하세요!")
 
 ```
 ToyPy/
-├─ Toypy.py          메인 실행기 (auto-import, 경고 검출)
+├─ Toypy.py          메인 실행기 (auto-import, 경고 검출, 런타임 traceback 역매핑)
 ├─ parser.py         DSL → AST 파서 (문장 단위)
 ├─ expr_parser.py    표현식 전용 AST 파서 (Pratt 스타일)
 ├─ codegen.py        AST → Python 코드 생성기
@@ -343,7 +343,33 @@ ToyPy는 단순 번역 이상의 편의를 제공합니다:
 - **미변환 경고**: DSL로 인식하지 못한 줄(오타 등)을 줄 번호와 함께 알려줍니다.
 - **인코딩 폴백**: UTF-8 우선, 실패 시 CP949로 재시도.
 - **표현식 AST 파싱**: 연산자 우선순위와 중첩을 정확히 처리해 `a + b 를 숫자로 봐줘` 같은 조합도 올바르게 변환. 파싱 실패 시 원문을 안전하게 유지합니다.
+- **런타임 traceback 역매핑**: 변환된 Python 실행 중 예외가 나면 생성된 Python 줄뿐 아니라 원본 DSL 파일명과 줄 번호를 함께 보여줍니다.
+- **스레드 예외 표시**: `threading`으로 실행한 작업에서 uncaught exception이 나도 DSL 기준 traceback으로 다시 보여줍니다.
 - **f-string 지원**: `f"점수: {점수}"`처럼 Python f-string을 그대로 쓸 수 있습니다.
+
+---
+
+## 디버깅
+
+변환은 성공했지만 실행 중 예외가 나는 경우, 생성된 `.py` 안에 주입된 traceback 훅이 원본 DSL 위치를 같이 보여줍니다.
+
+예를 들어 아래 DSL:
+
+```text
+화면에 보여줘 "시작"
+값 은 1 / 0
+```
+
+를 실행하면 traceback이 다음처럼 나옵니다:
+
+```text
+Traceback (most recent call last):
+  DSL File "Code\RuntimeTracebackTest.dsl", line 2, in <module> [generated Python line 70]
+    값 은 1 / 0
+ZeroDivisionError: division by zero
+```
+
+즉, 이제 `PythonScript/*.py`의 줄 번호만 보지 않아도 어떤 DSL 줄에서 예외가 났는지 바로 확인할 수 있습니다.
 
 ---
 
@@ -401,6 +427,9 @@ A. 파서가 자동으로 분리하니 안심하세요. `1부터 너비까지 �
 **Q. 복잡한 한줄 표현식이 이상하게 변환돼요**
 A. `a + b 를 숫자로 봐줘`처럼 중첩·결합이 있는 식도 AST 파서가 우선순위대로 처리합니다 (→ `a + int(b)`).
 그래도 의심스러우면 괄호로 의도를 명확히 하세요: `(a + b) 를 숫자로 봐줘`.
+
+**Q. 실행 중 예외가 나면 Python 줄 번호만 보여서 헷갈려요**
+A. 최신 버전에서는 uncaught exception이 나면 DSL 파일명과 줄 번호를 함께 보여줍니다. 메인 스레드뿐 아니라 `threading` 작업에서 난 예외도 같은 방식으로 표시됩니다.
 
 ---
 
